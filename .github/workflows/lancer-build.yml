@@ -1,0 +1,67 @@
+name: Fabriquer APK N64 Pad
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lancer-build.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Récupérer les fichiers
+        uses: actions/checkout@v4
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Installer Android
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9477386
+
+      - name: Télécharger le moteur libre
+        run: git clone --depth 1 https://github.com/mupen64plus-ae/mupen64plus-ae.git source
+
+      - name: Extraire le pad personnalisé
+        run: |
+          awk '/N64PAD_PAYLOAD/{if(found++) exit; next} found{sub(/^[[:space:]]+/,""); print}' \
+            .github/workflows/build-n64-pad-complet.yml | base64 --decode > overlay.tar.gz
+          tar -xzf overlay.tar.gz -C source
+
+      - name: Installer les dépendances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends file gawk
+
+      - name: Construire l’application
+        working-directory: source
+        run: ./gradlew assembleRelease
+
+      - name: Préparer l’APK
+        run: |
+          mkdir -p dist
+          cp source/app/build/outputs/apk/release/Mupen64PlusAE-release.apk dist/N64-Pad.apk
+
+      - name: Conserver l’APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: N64-Pad
+          path: dist/N64-Pad.apk
+
+      - name: Publier le téléchargement
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: n64-pad-latest
+          name: N64 Pad
+          prerelease: true
+          files: dist/N64-Pad.apk
