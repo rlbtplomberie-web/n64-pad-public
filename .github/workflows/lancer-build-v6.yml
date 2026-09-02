@@ -1,0 +1,254 @@
+name: Fabriquer APK N64 Pad V6
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lancer-build-v6.yml"
+      - ".github/workflows/n64-pad-v6-assets.b64"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9477386
+      - name: Télécharger le moteur libre
+        run: git clone --depth 1 https://github.com/mupen64plus-ae/mupen64plus-ae.git source
+      - name: Installer la base personnalisée
+        run: |
+          awk '/N64PAD_PAYLOAD/{if(found++) exit; next} found{sub(/^[[:space:]]+/,""); print}' \
+            .github/workflows/build-n64-pad-complet.yml | base64 --decode > overlay.tar.gz
+          tar -xzf overlay.tar.gz -C source
+      - name: Installer les fonds et les vraies touches V6
+        run: |
+          base64 --decode .github/workflows/n64-pad-v6-assets.b64 > v6-assets.tar.gz
+          tar -xzf v6-assets.tar.gz
+          rm -rf source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad
+          mv N64Pad source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad
+      - name: Corriger le plein écran et les commandes animées
+        run: |
+          cp source/app/src/main/res/layout-land/game_activity.xml source/app/src/main/res/layout/game_activity.xml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          touch = Path("source/app/src/main/java/paulscode/android/mupen64plusae/input/map/TouchMap.java")
+          code = touch.read_text()
+          code = code.replace("private final ArrayList<Integer> buttonX;", "protected final ArrayList<Integer> buttonX;")
+          code = code.replace("private final ArrayList<Integer> buttonY;", "protected final ArrayList<Integer> buttonY;")
+          if "protected Profile orientationProfile;" not in code:
+              code = code.replace(
+                  "boolean mSplitCSkin;",
+                  "boolean mSplitCSkin;\n\n    protected Profile orientationProfile;"
+              )
+          code = code.replace(
+              "// Clear any old assets and map data\n        clear();",
+              "// Clear any old assets and map data\n        clear();\n        orientationProfile = profile;"
+          )
+          marker = "// Recompute button locations\n        for( int i = 0; i < buttonImages.size(); i++ )"
+          orientation = '''// Apply the layout dedicated to the current orientation.
+                  if( orientationProfile != null )
+                  {
+                      String orientationName = w >= h ? "-landscape" : "-portrait";
+                      analogBackX = orientationProfile.getInt( "analog" + orientationName + "-x", analogBackX );
+                      analogBackY = orientationProfile.getInt( "analog" + orientationName + "-y", analogBackY );
+                      for( int i = 0; i < buttonNames.size(); i++ )
+                      {
+                          String controlName = buttonNames.get( i );
+                          buttonX.set( i, orientationProfile.getInt( controlName + orientationName + "-x", buttonX.get( i ) ) );
+                          buttonY.set( i, orientationProfile.getInt( controlName + orientationName + "-y", buttonY.get( i ) ) );
+                      }
+                  }
+          
+                  // Recompute button locations
+                  for( int i = 0; i < buttonImages.size(); i++ )'''
+          if orientation not in code:
+              if marker not in code:
+                  raise SystemExit("Point d'insertion TouchMap absent")
+              code = code.replace(marker, orientation, 1)
+          touch.write_text(code)
+
+          visible = Path("source/app/src/main/java/paulscode/android/mupen64plusae/input/map/VisibleTouchMap.java")
+          code = visible.read_text()
+          if "// Update position of the surrounding graphic" not in code:
+              raise SystemExit("Point de correction du joystick absent")
+          code = re.sub(
+              r'\s*// Update position of the surrounding graphic\s*analogBackImage\.fitCenter\([^;]+;\s*',
+              '\n\n            ', code, count=1
+          )
+          old_refresh = '''public void refreshButtonPosition( Profile profile, String name )
+              {
+                  super.updateButton( profile, name, cacheWidth, cacheHeight );
+              }'''
+          new_refresh = '''public void refreshButtonPosition( Profile profile, String name )
+              {
+                  String orientation = cacheWidth >= cacheHeight ? "-landscape" : "-portrait";
+                  profile.put( name + orientation + "-x", String.valueOf( profile.getInt( name + "-x", 0 ) ) );
+                  profile.put( name + orientation + "-y", String.valueOf( profile.getInt( name + "-y", 95 ) ) );
+                  super.updateButton( profile, name, cacheWidth, cacheHeight );
+              }'''
+          if old_refresh not in code:
+              raise SystemExit("Point de correction du déplacement manuel absent")
+          code = code.replace(old_refresh, new_refresh, 1)
+          load_marker = "        super.loadAllAssets( context, profile, animated );"
+          dpad_animation = '''        super.loadAllAssets( context, profile, animated );
+
+                  loadAutoHoldImages(context, profile, "dpad-holdDu");
+                  loadAutoHoldImages(context, profile, "dpad-holdDd");
+                  loadAutoHoldImages(context, profile, "dpad-holdDl");
+                  loadAutoHoldImages(context, profile, "dpad-holdDr");'''
+          if load_marker not in code:
+              raise SystemExit("Point d'animation de la croix absent")
+          code = code.replace(load_marker, dpad_animation, 1)
+          old = '''if ( buttonNames.get( j ).equals( name ) )
+                                  scaling = buttonScaling.get( j );'''
+          new = '''if ( buttonNames.get( j ).equals( name ) )
+                              {
+                                  scaling = buttonScaling.get( j );
+                                  autoHoldX[i] = buttonX.get( j );
+                                  autoHoldY[i] = buttonY.get( j );
+                              }'''
+          if old in code:
+              code = code.replace(old, new, 1)
+          visible.write_text(code)
+
+          prefs = Path("source/app/src/main/java/paulscode/android/mupen64plusae/persistent/GlobalPrefs.java")
+          code = prefs.read_text()
+          code = code.replace('DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Analog"', 'DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Everything"')
+          code = code.replace('DEFAULT_TOUCHSCREEN_DPAD_PROFILE_DEFAULT = "Digital"', 'DEFAULT_TOUCHSCREEN_DPAD_PROFILE_DEFAULT = "Everything"')
+          code = code.replace('mPreferences.getString( "touchscreenSkin_v2", "WiiU" )', '"N64Pad"')
+          prefs.write_text(code)
+
+          config = '''[Everything]
+          comment=N64 Pad V6 complet
+          touchscreenSkin=N64Pad
+          analog-x=3
+          analog-y=60
+          analog-scale=45
+          analog-min=1
+          analog-max=55
+          analog-buff=55
+          dpad-x=3
+          dpad-y=24
+          dpad-scale=45
+          buttonA-x=92
+          buttonA-y=67
+          buttonA-scale=45
+          buttonB-x=84
+          buttonB-y=55
+          buttonB-scale=45
+          buttonCu-x=89
+          buttonCu-y=20
+          buttonCu-scale=45
+          buttonCl-x=84
+          buttonCl-y=32
+          buttonCl-scale=45
+          buttonCr-x=95
+          buttonCr-y=32
+          buttonCr-scale=45
+          buttonCd-x=89
+          buttonCd-y=44
+          buttonCd-scale=45
+          buttonL-x=2
+          buttonL-y=1
+          buttonL-scale=45
+          buttonR-x=98
+          buttonR-y=1
+          buttonR-scale=45
+          buttonZ-x=3
+          buttonZ-y=48
+          buttonZ-scale=45
+          buttonS-x=50
+          buttonS-y=82
+          buttonS-scale=45
+          analog-landscape-x=3
+          analog-landscape-y=60
+          analog-portrait-x=34
+          analog-portrait-y=72
+          dpad-landscape-x=3
+          dpad-landscape-y=24
+          dpad-portrait-x=5
+          dpad-portrait-y=56
+          buttonA-landscape-x=92
+          buttonA-landscape-y=67
+          buttonA-portrait-x=83
+          buttonA-portrait-y=76
+          buttonB-landscape-x=84
+          buttonB-landscape-y=55
+          buttonB-portrait-x=70
+          buttonB-portrait-y=69
+          buttonCu-landscape-x=89
+          buttonCu-landscape-y=20
+          buttonCu-portrait-x=79
+          buttonCu-portrait-y=51
+          buttonCl-landscape-x=84
+          buttonCl-landscape-y=32
+          buttonCl-portrait-x=69
+          buttonCl-portrait-y=57
+          buttonCr-landscape-x=95
+          buttonCr-landscape-y=32
+          buttonCr-portrait-x=89
+          buttonCr-portrait-y=57
+          buttonCd-landscape-x=89
+          buttonCd-landscape-y=44
+          buttonCd-portrait-x=79
+          buttonCd-portrait-y=63
+          buttonL-landscape-x=2
+          buttonL-landscape-y=1
+          buttonL-portrait-x=3
+          buttonL-portrait-y=40
+          buttonR-landscape-x=98
+          buttonR-landscape-y=1
+          buttonR-portrait-x=97
+          buttonR-portrait-y=40
+          buttonZ-landscape-x=3
+          buttonZ-landscape-y=48
+          buttonZ-portrait-x=4
+          buttonZ-portrait-y=70
+          buttonS-landscape-x=50
+          buttonS-landscape-y=82
+          buttonS-portrait-x=50
+          buttonS-portrait-y=47
+          '''
+          config = "\n".join(line.strip() for line in config.splitlines()) + "\n"
+          Path("source/app/src/main/assets/mupen64plus_data/profiles/touchscreen.cfg").write_text(config)
+          PY
+      - name: Vérifier les éléments V6
+        run: |
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/background-landscape.png
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/background-portrait.png
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/buttonA-holdA.png
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/buttonZ.png
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/dpad-holdDu.png
+          cmp source/app/src/main/res/layout/game_activity.xml source/app/src/main/res/layout-land/game_activity.xml
+          grep -q 'profile.put( name + orientation' source/app/src/main/java/paulscode/android/mupen64plusae/input/map/VisibleTouchMap.java
+          grep -q 'protected final ArrayList<Integer> buttonX' source/app/src/main/java/paulscode/android/mupen64plusae/input/map/TouchMap.java
+      - name: Construire l’application
+        working-directory: source
+        run: ./gradlew assembleRelease
+      - name: Préparer l’APK
+        run: |
+          mkdir -p dist
+          cp source/app/build/outputs/apk/release/Mupen64PlusAE-release.apk dist/N64-Pad-V6.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: N64-Pad-V6
+          path: dist/N64-Pad-V6.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: n64-pad-v6
+          name: N64 Pad V6
+          prerelease: true
+          files: dist/N64-Pad-V6.apk
