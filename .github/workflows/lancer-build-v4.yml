@@ -1,0 +1,188 @@
+name: Fabriquer APK N64 Pad V4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lancer-build-v4.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9477386
+      - name: Télécharger le moteur libre
+        run: git clone --depth 1 https://github.com/mupen64plus-ae/mupen64plus-ae.git source
+      - name: Installer le skin V4
+        run: |
+          awk '/N64PAD_PAYLOAD/{if(found++) exit; next} found{sub(/^[[:space:]]+/,""); print}' \
+            .github/workflows/build-n64-pad-complet.yml | base64 --decode > overlay.tar.gz
+          tar -xzf overlay.tar.gz -C source
+          python3 - <<'PY'
+          from pathlib import Path
+
+          touch = Path("source/app/src/main/java/paulscode/android/mupen64plusae/input/map/TouchMap.java")
+          s = touch.read_text()
+          s = s.replace(
+              "boolean mSplitCSkin;",
+              "boolean mSplitCSkin;\n\n    /** Profile retained so portrait and landscape positions can be applied on resize. */\n    protected Profile orientationProfile;"
+          )
+          s = s.replace(
+              "// Clear any old assets and map data\n        clear();",
+              "// Clear any old assets and map data\n        clear();\n        orientationProfile = profile;"
+          )
+          marker = "// Recompute button locations\n        for( int i = 0; i < buttonImages.size(); i++ )"
+          replacement = '''// Apply the positions dedicated to the current orientation.
+                  if( orientationProfile != null )
+                  {
+                      String orientation = w >= h ? "-landscape" : "-portrait";
+                      analogBackX = orientationProfile.getInt( "analog" + orientation + "-x", analogBackX );
+                      analogBackY = orientationProfile.getInt( "analog" + orientation + "-y", analogBackY );
+                      for( int i = 0; i < buttonNames.size(); i++ )
+                      {
+                          String name = buttonNames.get( i );
+                          buttonX.set( i, orientationProfile.getInt( name + orientation + "-x", buttonX.get( i ) ) );
+                          buttonY.set( i, orientationProfile.getInt( name + orientation + "-y", buttonY.get( i ) ) );
+                      }
+                  }
+          
+                  // Recompute button locations
+                  for( int i = 0; i < buttonImages.size(); i++ )'''
+          if marker not in s:
+              raise SystemExit("TouchMap resize marker absent")
+          s = s.replace(marker, replacement, 1)
+          touch.write_text(s)
+
+          visible = Path("source/app/src/main/java/paulscode/android/mupen64plusae/input/map/VisibleTouchMap.java")
+          s = visible.read_text()
+          old = '''if ( buttonNames.get( j ).equals( name ) )
+                                  scaling = buttonScaling.get( j );'''
+          new = '''if ( buttonNames.get( j ).equals( name ) )
+                              {
+                                  scaling = buttonScaling.get( j );
+                                  autoHoldX[i] = buttonX.get( j );
+                                  autoHoldY[i] = buttonY.get( j );
+                              }'''
+          if old not in s:
+              raise SystemExit("VisibleTouchMap hold marker absent")
+          visible.write_text(s.replace(old, new, 1))
+
+          prefs = Path("source/app/src/main/java/paulscode/android/mupen64plusae/persistent/GlobalPrefs.java")
+          s = prefs.read_text()
+          s = s.replace('DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Analog"', 'DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Everything"')
+          s = s.replace('DEFAULT_TOUCHSCREEN_DPAD_PROFILE_DEFAULT = "Digital"', 'DEFAULT_TOUCHSCREEN_DPAD_PROFILE_DEFAULT = "Everything"')
+          s = s.replace('mPreferences.getString( "touchscreenSkin_v2", "WiiU" )', '"N64Pad"')
+          prefs.write_text(s)
+
+          cfg = Path("source/app/src/main/assets/mupen64plus_data/profiles/touchscreen.cfg")
+          s = cfg.read_text().replace("touchscreenSkin=WiiU", "touchscreenSkin=N64Pad")
+          scale_lines = """
+          analog-scale=55
+          dpad-scale=55
+          groupAB-scale=55
+          groupC-scale=55
+          buttonL-scale=55
+          buttonR-scale=55
+          buttonZ-scale=55
+          buttonS-scale=55
+          """
+          pos_lines = """
+          analog-landscape-x=4
+          analog-landscape-y=59
+          analog-portrait-x=43
+          analog-portrait-y=72
+          dpad-landscape-x=4
+          dpad-landscape-y=18
+          dpad-portrait-x=8
+          dpad-portrait-y=58
+          groupAB-landscape-x=91
+          groupAB-landscape-y=57
+          groupAB-portrait-x=88
+          groupAB-portrait-y=76
+          groupC-landscape-x=95
+          groupC-landscape-y=21
+          groupC-portrait-x=84
+          groupC-portrait-y=56
+          buttonL-landscape-x=3
+          buttonL-landscape-y=1
+          buttonL-portrait-x=3
+          buttonL-portrait-y=45
+          buttonR-landscape-x=96
+          buttonR-landscape-y=1
+          buttonR-portrait-x=95
+          buttonR-portrait-y=45
+          buttonZ-landscape-x=4
+          buttonZ-landscape-y=43
+          buttonZ-portrait-x=4
+          buttonZ-portrait-y=68
+          buttonS-landscape-x=50
+          buttonS-landscape-y=79
+          buttonS-portrait-x=50
+          buttonS-portrait-y=51
+          """
+          start = s.index("[Everything]")
+          s = s[:start] + s[start:].replace("touchscreenSkin=N64Pad", "touchscreenSkin=N64Pad\n" + scale_lines.strip() + "\n" + pos_lines.strip(), 1)
+          cfg.write_text(s)
+          PY
+      - name: Retirer les anciens boutons visibles
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          skin = Path("source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad")
+          normal = [
+              "dpad.png", "groupAB.png", "groupC.png", "buttonA.png", "buttonB.png",
+              "buttonCu.png", "buttonCd.png", "buttonCl.png", "buttonCr.png",
+              "buttonL.png", "buttonR.png", "buttonZ.png", "buttonS.png", "buttonSen.png",
+              "analog-back.png", "analog.png"
+          ]
+          for name in normal:
+              p = skin / name
+              if p.exists():
+                  im = Image.open(p).convert("RGBA")
+                  im.putalpha(0)
+                  im.save(p)
+          # Keep the small movable analog cap so the stick still reacts visibly.
+          fore = skin / "analog-fore.png"
+          if fore.exists():
+              im = Image.open(fore).convert("RGBA")
+              alpha = im.getchannel("A").point(lambda a: int(a * 0.70))
+              im.putalpha(alpha)
+              im.save(fore)
+          PY
+      - name: Vérifier la V4
+        run: |
+          grep -q 'orientationProfile = profile' source/app/src/main/java/paulscode/android/mupen64plusae/input/map/TouchMap.java
+          grep -q 'touchscreenSkin = "N64Pad"' source/app/src/main/java/paulscode/android/mupen64plusae/persistent/GlobalPrefs.java
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/background-landscape.png
+          test -f source/app/src/main/assets/mupen64plus_data/skins/touchscreen/N64Pad/background-portrait.png
+      - name: Construire l’application
+        working-directory: source
+        run: ./gradlew assembleRelease
+      - name: Préparer l’APK
+        run: |
+          mkdir -p dist
+          cp source/app/build/outputs/apk/release/Mupen64PlusAE-release.apk dist/N64-Pad-V4.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: N64-Pad-V4
+          path: dist/N64-Pad-V4.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: n64-pad-v4
+          name: N64 Pad V4
+          prerelease: true
+          files: dist/N64-Pad-V4.apk
