@@ -1,0 +1,62 @@
+name: Fabriquer APK N64 Pad V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lancer-build-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Récupérer les fichiers
+        uses: actions/checkout@v4
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Installer Android
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 9477386
+      - name: Télécharger le moteur libre
+        run: git clone --depth 1 https://github.com/mupen64plus-ae/mupen64plus-ae.git source
+      - name: Extraire et activer N64 Pad partout
+        run: |
+          awk '/N64PAD_PAYLOAD/{if(found++) exit; next} found{sub(/^[[:space:]]+/,""); print}' \
+            .github/workflows/build-n64-pad-complet.yml | base64 --decode > overlay.tar.gz
+          tar -xzf overlay.tar.gz -C source
+          sed -i 's/touchscreenSkin=WiiU/touchscreenSkin=N64Pad/g' \
+            source/app/src/main/assets/mupen64plus_data/profiles/touchscreen.cfg
+          sed -i 's/DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Analog"/DEFAULT_TOUCHSCREEN_PROFILE_DEFAULT = "Everything"/' \
+            source/app/src/main/java/paulscode/android/mupen64plusae/persistent/GlobalPrefs.java
+      - name: Installer les dépendances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends file gawk
+      - name: Construire l’application
+        working-directory: source
+        run: ./gradlew assembleRelease
+      - name: Préparer l’APK
+        run: |
+          mkdir -p dist
+          cp source/app/build/outputs/apk/release/Mupen64PlusAE-release.apk dist/N64-Pad-V2.apk
+      - name: Conserver l’APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: N64-Pad-V2
+          path: dist/N64-Pad-V2.apk
+      - name: Publier le téléchargement
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: n64-pad-v2
+          name: N64 Pad V2
+          prerelease: true
+          files: dist/N64-Pad-V2.apk
